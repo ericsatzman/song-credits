@@ -187,11 +187,12 @@ class Song_Credits_API {
      * Query MusicBrainz for recording-level and work-level credits.
      */
     private function fetch_musicbrainz( $artist, $title ) {
-        $result = array(
+        $empty_result = array(
             'artist'     => '',
             'title'      => '',
             'year'       => '',
             'categories' => array(),
+            'has_instrumentation' => false,
         );
 
         // 1. Search for the recording.
@@ -211,15 +212,69 @@ class Song_Credits_API {
         );
 
         if ( is_wp_error( $search ) || empty( $search['recordings'] ) ) {
-            return $result;
+            return $empty_result;
         }
 
-        $recording = $this->pick_best_mb_recording( $search['recordings'], $artist, $title );
+        $candidates = $this->rank_mb_recordings( $search['recordings'], $artist, $title );
+        if ( empty( $candidates ) ) {
+            return $empty_result;
+        }
+
+        $best_with_instrumentation = array();
+        $best_with_any_credits     = array();
+
+        foreach ( $candidates as $idx => $recording ) {
+            // Avoid excessive latency while still improving match quality.
+            if ( $idx >= 3 ) {
+                break;
+            }
+            $candidate = $this->fetch_musicbrainz_candidate( $recording );
+            if ( empty( $candidate['id'] ) ) {
+                continue;
+            }
+
+            if ( empty( $best_with_any_credits ) && ! empty( $candidate['categories'] ) ) {
+                $best_with_any_credits = $candidate;
+            }
+
+            if ( ! empty( $candidate['has_instrumentation'] ) ) {
+                $best_with_instrumentation = $candidate;
+                break;
+            }
+        }
+
+        if ( ! empty( $best_with_instrumentation ) ) {
+            unset( $best_with_instrumentation['has_instrumentation'] );
+            return $best_with_instrumentation;
+        }
+        if ( ! empty( $best_with_any_credits ) ) {
+            unset( $best_with_any_credits['has_instrumentation'] );
+            return $best_with_any_credits;
+        }
+
+        return $empty_result;
+    }
+
+    /**
+     * Build a MusicBrainz candidate result from one recording.
+     */
+    private function fetch_musicbrainz_candidate( $recording ) {
+        $result = array(
+            'id'         => '',
+            'artist'     => '',
+            'title'      => '',
+            'year'       => '',
+            'categories' => array(),
+            'has_instrumentation' => false,
+        );
+
         if ( empty( $recording['id'] ) ) {
             return $result;
         }
-        $recording_id = $recording['id'];
-        $result['title'] = $recording['title'];
+
+        $recording_id   = $recording['id'];
+        $result['id']   = $recording_id;
+        $result['title'] = $recording['title'] ?? '';
         if ( ! empty( $recording['first-release-date'] ) ) {
             $result['year'] = $this->extract_year( $recording['first-release-date'] );
         }
@@ -232,14 +287,15 @@ class Song_Credits_API {
             }
         }
 
-        // 2. Get recording relationships (performers, engineers, producers).
         sleep( 1 ); // MusicBrainz rate-limit: 1 req/s.
-
         $detail = $this->request(
-            add_query_arg( array(
-                'inc' => 'artist-credits+artist-rels+work-rels+instrument-rels',
-                'fmt' => 'json',
-            ), $this->mb_base . 'recording/' . $recording_id ),
+            add_query_arg(
+                array(
+                    'inc' => 'artist-credits+artist-rels+work-rels+instrument-rels',
+                    'fmt' => 'json',
+                ),
+                $this->mb_base . 'recording/' . $recording_id
+            ),
             'musicbrainz'
         );
 
@@ -249,23 +305,23 @@ class Song_Credits_API {
 
         if ( ! empty( $detail['relations'] ) ) {
             foreach ( $detail['relations'] as $rel ) {
-                // MusicBrainz returns instrument credits with target-type "artist"
-                // and a type like "guitar", "piano", "drums", etc., OR
-                // with type = "instrument" and the actual instrument in attributes.
                 if ( empty( $rel['artist'] ) ) {
                     continue;
                 }
                 $cat  = $this->mb_categorize( $rel['type'], $rel );
                 $role = $this->mb_role( $rel );
                 $this->append_unique_credit( $result['categories'], $cat, $rel['artist']['name'], $role );
+                if ( 'Performers' === $cat && $this->looks_like_instrumentation_role( $role ) ) {
+                    $result['has_instrumentation'] = true;
+                }
                 $instrument_role = $this->mb_instrumentation_role( $rel );
                 if ( '' !== $instrument_role ) {
                     $this->append_unique_credit( $result['categories'], 'Performers', $rel['artist']['name'], $instrument_role );
+                    $result['has_instrumentation'] = true;
                 }
             }
         }
 
-        // 3. Follow the "performance" link to the *work* for songwriter data.
         if ( ! empty( $detail['relations'] ) ) {
             foreach ( $detail['relations'] as $rel ) {
                 if ( 'performance' !== ( $rel['type'] ?? '' ) || empty( $rel['work']['id'] ) ) {
@@ -290,9 +346,13 @@ class Song_Credits_API {
                         $cat  = $this->mb_categorize( $wrel['type'], $wrel );
                         $role = $this->mb_role( $wrel );
                         $this->append_unique_credit( $result['categories'], $cat, $wrel['artist']['name'], $role );
+                        if ( 'Performers' === $cat && $this->looks_like_instrumentation_role( $role ) ) {
+                            $result['has_instrumentation'] = true;
+                        }
                         $instrument_role = $this->mb_instrumentation_role( $wrel );
                         if ( '' !== $instrument_role ) {
                             $this->append_unique_credit( $result['categories'], 'Performers', $wrel['artist']['name'], $instrument_role );
+                            $result['has_instrumentation'] = true;
                         }
                     }
                 }
@@ -786,6 +846,46 @@ class Song_Credits_API {
     }
 
     /**
+     * Rank MusicBrainz recordings by text match quality.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    private function rank_mb_recordings( $recordings, $artist, $title ) {
+        $scored = array();
+        foreach ( (array) $recordings as $recording ) {
+            if ( empty( $recording['id'] ) ) {
+                continue;
+            }
+            $recording_title  = isset( $recording['title'] ) ? (string) $recording['title'] : '';
+            $recording_artist = '';
+            if ( ! empty( $recording['artist-credit'] ) ) {
+                $recording_artist = $this->format_artist_credit( $recording['artist-credit'] );
+            }
+            $title_score  = $this->score_text_match( $title, $recording_title );
+            $artist_score = $this->score_text_match( $artist, $recording_artist );
+            $score        = ( $title_score * 0.7 ) + ( $artist_score * 0.3 );
+            $scored[] = array(
+                'score'     => $score,
+                'recording' => $recording,
+            );
+        }
+
+        usort(
+            $scored,
+            static function( $a, $b ) {
+                if ( $a['score'] === $b['score'] ) {
+                    return 0;
+                }
+                return ( $a['score'] > $b['score'] ) ? -1 : 1;
+            }
+        );
+
+        return array_values( array_map( static function( $item ) {
+            return $item['recording'];
+        }, $scored ) );
+    }
+
+    /**
      * Choose the most likely Discogs release search result.
      */
     private function pick_best_discogs_result( $results, $artist, $title ) {
@@ -1188,6 +1288,13 @@ class Song_Credits_API {
         }
 
         return false;
+    }
+
+    /**
+     * Determine whether role text appears to include instrumentation.
+     */
+    private function looks_like_instrumentation_role( $role ) {
+        return $this->looks_like_performer_text( $role ) && false === strpos( strtolower( (string) $role ), 'primary artist' );
     }
 
     /**

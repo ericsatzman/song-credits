@@ -13,6 +13,22 @@
                  Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
 }
 
+.song-credits-skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+}
+
+.song-credits-skip-link:focus {
+    left: 1rem;
+    top: 1rem;
+    background: #1a202c;
+    color: #fff;
+    padding: 0.6rem 0.8rem;
+    border-radius: 6px;
+    z-index: 1000;
+}
+
 /* ---- Form -------------------------------------------------------------- */
 .song-credits-form {
     background: #f8f9fa;
@@ -52,6 +68,14 @@
     box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.15);
 }
 
+.song-credits-field input[type="text"]:focus-visible,
+.song-credits-button:focus-visible,
+.song-credits-recent-item:focus-visible,
+.song-credits-sources a:focus-visible {
+    outline: 3px solid #2b6cb0;
+    outline-offset: 2px;
+}
+
 /* ---- Button ------------------------------------------------------------ */
 .song-credits-button {
     padding: 0.7rem 1.5rem;
@@ -86,8 +110,86 @@
     background: #2d3748;
 }
 
+.song-credits-recent {
+    margin-top: 0.9rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+    background: #f7fafc;
+}
+
+.song-credits-recent-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+}
+
+.song-credits-recent-title {
+    margin: 0 0 0.45rem;
+    font-size: 0.9rem;
+    color: #2d3748;
+}
+
+.song-credits-recent-reset {
+    border: 1px solid #cbd5e0;
+    background: #fff;
+    color: #2d3748;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    padding: 0.3rem 0.55rem;
+    cursor: pointer;
+}
+
+.song-credits-recent-reset:hover:not(:disabled) {
+    border-color: #3182ce;
+    color: #2c5282;
+}
+
+.song-credits-recent-reset:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.song-credits-recent-empty {
+    margin: 0;
+    color: #718096;
+    font-size: 0.9rem;
+}
+
+.song-credits-recent-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.song-credits-recent-item {
+    border: 1px solid #cbd5e0;
+    background: #fff;
+    color: #2d3748;
+    border-radius: 999px;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.82rem;
+    cursor: pointer;
+}
+
+.song-credits-recent-item:hover {
+    border-color: #3182ce;
+    color: #2c5282;
+}
+
 /* ---- Results ----------------------------------------------------------- */
-.song-credits-results { margin-top: 1.5rem; }
+.song-credits-results {
+    margin-top: 1.5rem;
+    border: 1px solid #edf2f7;
+    border-radius: 8px;
+    padding: 0 1rem 1rem;
+}
+
+.song-credits-results:focus {
+    outline: none;
+    border-color: #edf2f7;
+}
 
 .song-credits-header {
     text-align: center;
@@ -126,7 +228,7 @@
 
 .song-credits-category {
     background: #fff;
-    border: 1px solid #e2e8f0;
+    border: 1px solid #edf2f7;
     border-radius: 8px;
     padding: 1.25rem;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
@@ -195,6 +297,48 @@
     font-size: 0.95rem;
 }
 
+.song-credits-animate {
+    animation-duration: 380ms;
+    animation-fill-mode: both;
+    animation-timing-function: ease;
+}
+
+.song-credits-fade-in {
+    animation-name: songCreditsFadeIn;
+}
+
+.song-credits-slide-up {
+    animation-name: songCreditsSlideUp;
+}
+
+@keyframes songCreditsFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes songCreditsSlideUp {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.screen-reader-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 /* ---- Responsive -------------------------------------------------------- */
 @media (max-width: 480px) {
     .song-credits-wrap  { margin: 1rem auto; }
@@ -206,4 +350,10 @@
     .song-credits-song-title { font-size: 1.3rem; }
     .song-credits-entry { grid-template-columns: 1fr; row-gap: 0.15rem; }
     .song-credits-role  { text-align: left; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .song-credits-animate {
+        animation: none !important;
+    }
 }
