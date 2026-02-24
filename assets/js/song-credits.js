@@ -4,11 +4,37 @@
  * Vanilla JS, no jQuery dependency.
  * Uses the Fetch API to POST to admin-ajax.php.
  */
-( function () {
+( function ( root, factory ) {
+    if ( typeof module !== 'undefined' && module.exports ) {
+        module.exports = factory( root );
+        return;
+    }
+    factory( root );
+}( typeof globalThis !== 'undefined' ? globalThis : this, function ( root ) {
     'use strict';
 
+    function extractLookupParams( search ) {
+        var params = new URLSearchParams( search || '' );
+        var artist = ( params.get( 'sc_artist' ) || params.get( 'artist' ) || '' ).trim();
+        var title  = ( params.get( 'sc_title' ) || params.get( 'title' ) || '' ).trim();
+        return {
+            artist: artist,
+            title: title,
+        };
+    }
+
+    if ( root ) {
+        root.songCreditsExtractLookupParams = extractLookupParams;
+    }
+
+    if ( typeof document === 'undefined' ) {
+        return {
+            extractLookupParams: extractLookupParams,
+        };
+    }
+
     document.addEventListener( 'DOMContentLoaded', function () {
-        if ( typeof window.songCreditsData === 'undefined' || ! window.songCreditsData ) {
+        if ( typeof root.songCreditsData === 'undefined' || ! root.songCreditsData ) {
             return;
         }
 
@@ -40,18 +66,18 @@
             // UI: disable button, show spinner text.
             var originalLabel = btn.textContent;
             btn.disabled    = true;
-            btn.textContent = songCreditsData.i18n.searching;
+            btn.textContent = root.songCreditsData.i18n.searching;
             btn.classList.add( 'song-credits-loading' );
             results.innerHTML   = '';
             results.className   = 'song-credits-results';
 
             var body = new FormData();
             body.append( 'action', 'song_credits_lookup' );
-            body.append( 'nonce',  songCreditsData.nonce );
+            body.append( 'nonce',  root.songCreditsData.nonce );
             body.append( 'artist', artist );
             body.append( 'title',  title );
 
-            fetch( songCreditsData.ajaxUrl, {
+            fetch( root.songCreditsData.ajaxUrl, {
                 method:      'POST',
                 credentials: 'same-origin',
                 body:        body,
@@ -63,11 +89,11 @@
                 } else {
                     showError( json.data && json.data.message
                         ? json.data.message
-                        : songCreditsData.i18n.noResults );
+                        : root.songCreditsData.i18n.noResults );
                 }
             } )
             .catch( function () {
-                showError( songCreditsData.i18n.error );
+                showError( root.songCreditsData.i18n.error );
             } )
             .finally( function () {
                 btn.disabled    = false;
@@ -81,31 +107,28 @@
         /* ---- Renderers -------------------------------------------- */
 
         function autoLookupFromQuery() {
-            var params = new URLSearchParams( window.location.search || '' );
-            var artist = ( params.get( 'sc_artist' ) || params.get( 'artist' ) || '' ).trim();
-            var title  = ( params.get( 'sc_title' ) || params.get( 'title' ) || '' ).trim();
-
-            if ( ! artist || ! title ) {
+            var lookup = extractLookupParams( root.location ? root.location.search : '' );
+            if ( ! lookup.artist || ! lookup.title ) {
                 return;
             }
 
-            form.querySelector( '[name="artist"]' ).value = artist;
-            form.querySelector( '[name="title"]' ).value = title;
+            form.querySelector( '[name="artist"]' ).value = lookup.artist;
+            form.querySelector( '[name="title"]' ).value = lookup.title;
             form.dispatchEvent( new Event( 'submit', { cancelable: true } ) );
             clearLookupQueryParams();
         }
 
         function clearLookupQueryParams() {
-            if ( ! window.history || ! window.history.replaceState ) {
+            if ( ! root.history || ! root.history.replaceState || ! root.location ) {
                 return;
             }
 
-            var url = new URL( window.location.href );
+            var url = new URL( root.location.href );
             url.searchParams.delete( 'sc_artist' );
             url.searchParams.delete( 'sc_title' );
             url.searchParams.delete( 'artist' );
             url.searchParams.delete( 'title' );
-            window.history.replaceState( {}, '', url.toString() );
+            root.history.replaceState( {}, '', url.toString() );
         }
 
         function renderCredits( data ) {
@@ -160,7 +183,7 @@
             // Sources footer.
             if ( data.sources && data.sources.length ) {
                 var src = el( 'div', 'song-credits-sources',
-                    songCreditsData.i18n.sources + ' ' + data.sources.join( ', ' ) );
+                    root.songCreditsData.i18n.sources + ' ' + data.sources.join( ', ' ) );
                 results.appendChild( src );
             }
 
@@ -183,4 +206,8 @@
             return node;
         }
     } );
-} )();
+
+    return {
+        extractLookupParams: extractLookupParams,
+    };
+} ) );

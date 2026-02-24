@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<phpunit
+    bootstrap="tests/php/bootstrap.php"
+    colors="true"
+    verbose="true"
+>
+    <testsuites>
+        <testsuite name="Song Credits Integration">
+            <directory suffix=".php">tests/php</directory>
+        </testsuite>
+    </testsuites>
+</phpunit>

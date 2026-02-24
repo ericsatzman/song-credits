@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<ruleset name="Song Credits">
+    <description>WordPress Core and Security coding standards.</description>
+
+    <file>song-credits.php</file>
+    <file>includes</file>
+    <exclude-pattern>tests/*</exclude-pattern>
+
+    <arg name="extensions" value="php"/>
+
+    <rule ref="WordPress-Core"/>
+    <rule ref="WordPress-Security"/>
+</ruleset>

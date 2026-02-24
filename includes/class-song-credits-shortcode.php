@@ -24,6 +24,7 @@ class Song_Credits_Shortcode {
         add_action( 'wp_enqueue_scripts', array( $this, 'register_assets' ) );
         add_action( 'wp_ajax_song_credits_lookup',        array( $this, 'ajax_lookup' ) );
         add_action( 'wp_ajax_nopriv_song_credits_lookup', array( $this, 'ajax_lookup' ) );
+        add_action( 'song_credits_api_error', array( $this, 'track_api_error' ), 10, 2 );
     }
 
     /* --- Assets ----------------------------------------------------- */
@@ -107,6 +108,20 @@ class Song_Credits_Shortcode {
     /* --- AJAX Handler ----------------------------------------------- */
 
     public function ajax_lookup() {
+        $started_at = microtime( true );
+        if ( ! wp_doing_ajax() ) {
+            wp_send_json_error(
+                array( 'message' => __( 'Invalid request context.', 'song-credits' ) ),
+                400
+            );
+        }
+
+        if ( 'POST' !== strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ?? '' ) ) ) ) {
+            wp_send_json_error(
+                array( 'message' => __( 'Method not allowed.', 'song-credits' ) ),
+                405
+            );
+        }
 
         // 1. Verify nonce.
         if ( ! check_ajax_referer( 'song_credits_nonce', 'nonce', false ) ) {
@@ -117,12 +132,20 @@ class Song_Credits_Shortcode {
         }
 
         // 2. Simple per-IP rate limiting (10 req / min).
-        $remote_ip = isset( $_SERVER['REMOTE_ADDR'] ) ? wp_unslash( $_SERVER['REMOTE_ADDR'] ) : 'unknown';
-        $ip_hash   = md5( sanitize_text_field( $remote_ip ) );
-        $rate_key  = 'song_credits_rate_' . $ip_hash;
+        if ( is_user_logged_in() ) {
+            $rate_key = 'song_credits_rate_user_' . get_current_user_id();
+        } else {
+            $remote_ip = isset( $_SERVER['REMOTE_ADDR'] ) ? wp_unslash( $_SERVER['REMOTE_ADDR'] ) : 'unknown';
+            $ip_hash   = md5( sanitize_text_field( $remote_ip ) );
+            $rate_key  = 'song_credits_rate_ip_' . $ip_hash;
+        }
         $rate_count = (int) get_transient( $rate_key );
 
-        if ( $rate_count >= 10 ) {
+        $settings = get_option( 'song_credits_settings', array() );
+        $limit    = ! empty( $settings['rate_limit_per_minute'] ) ? (int) $settings['rate_limit_per_minute'] : 10;
+        $limit    = min( 120, max( 1, $limit ) );
+
+        if ( $rate_count >= $limit ) {
             wp_send_json_error(
                 array( 'message' => __( 'Too many requests. Please wait a minute.', 'song-credits' ) ),
                 429
@@ -141,7 +164,9 @@ class Song_Credits_Shortcode {
             );
         }
 
-        if ( mb_strlen( $artist ) > 200 || mb_strlen( $title ) > 200 ) {
+        $artist_len = function_exists( 'mb_strlen' ) ? mb_strlen( $artist ) : strlen( $artist );
+        $title_len  = function_exists( 'mb_strlen' ) ? mb_strlen( $title ) : strlen( $title );
+        if ( $artist_len > 200 || $title_len > 200 ) {
             wp_send_json_error(
                 array( 'message' => __( 'Input exceeds the 200-character limit.', 'song-credits' ) ),
                 400
@@ -149,21 +174,42 @@ class Song_Credits_Shortcode {
         }
 
         // 4. Check transient cache.
-        $settings    = get_option( 'song_credits_settings', array() );
         $cache_hours = ! empty( $settings['cache_duration'] ) ? (int) $settings['cache_duration'] : 24;
         $cache_hours = min( 168, max( 1, $cache_hours ) );
         $cache_key   = 'song_credits_' . md5( strtolower( $artist ) . '|' . strtolower( $title ) );
         $cached      = get_transient( $cache_key );
 
         if ( false !== $cached ) {
+            $this->update_metrics(
+                array(
+                    'total_requests'   => 1,
+                    'cache_hits'       => 1,
+                    'successful_lookups' => 1,
+                    'latency_ms'       => $this->elapsed_ms( $started_at ),
+                    'sources'          => is_array( $cached['sources'] ?? null ) ? $cached['sources'] : array(),
+                )
+            );
             wp_send_json_success( $cached );
         }
 
         // 5. Fetch fresh data.
-        $api     = new Song_Credits_API();
-        $credits = $api->fetch_credits( $artist, $title );
+        $pre = apply_filters( 'song_credits_pre_lookup_result', null, $artist, $title );
+        if ( is_array( $pre ) ) {
+            $credits = $pre;
+        } else {
+            $api     = new Song_Credits_API();
+            $credits = $api->fetch_credits( $artist, $title );
+        }
 
         if ( empty( $credits['categories'] ) ) {
+            $this->update_metrics(
+                array(
+                    'total_requests' => 1,
+                    'cache_misses'   => 1,
+                    'failed_lookups' => 1,
+                    'latency_ms'     => $this->elapsed_ms( $started_at ),
+                )
+            );
             wp_send_json_error(
                 array( 'message' => __( 'No credits found. Check spelling or try the full official title.', 'song-credits' ) ),
                 200
@@ -172,6 +218,80 @@ class Song_Credits_Shortcode {
 
         // 6. Cache and return.
         set_transient( $cache_key, $credits, $cache_hours * HOUR_IN_SECONDS );
+        $this->update_metrics(
+            array(
+                'total_requests'      => 1,
+                'cache_misses'        => 1,
+                'successful_lookups'  => 1,
+                'latency_ms'          => $this->elapsed_ms( $started_at ),
+                'sources'             => is_array( $credits['sources'] ?? null ) ? $credits['sources'] : array(),
+            )
+        );
         wp_send_json_success( $credits );
+    }
+
+    /**
+     * Track API errors for admin metrics.
+     */
+    public function track_api_error( $source, $code ) {
+        $metrics = get_option( 'song_credits_metrics', array() );
+        if ( ! is_array( $metrics ) ) {
+            $metrics = array();
+        }
+        if ( empty( $metrics['api_error_counts'] ) || ! is_array( $metrics['api_error_counts'] ) ) {
+            $metrics['api_error_counts'] = array();
+        }
+
+        $key = sanitize_key( (string) $source ) . ':' . sanitize_key( (string) $code );
+        if ( '' !== $key ) {
+            $metrics['api_error_counts'][ $key ] = isset( $metrics['api_error_counts'][ $key ] )
+                ? ( (int) $metrics['api_error_counts'][ $key ] + 1 )
+                : 1;
+        }
+        update_option( 'song_credits_metrics', $metrics, false );
+    }
+
+    /**
+     * Update persistent plugin metrics.
+     */
+    private function update_metrics( $delta ) {
+        $metrics = get_option( 'song_credits_metrics', array() );
+        if ( ! is_array( $metrics ) ) {
+            $metrics = array();
+        }
+
+        $counters = array( 'total_requests', 'cache_hits', 'cache_misses', 'successful_lookups', 'failed_lookups' );
+        foreach ( $counters as $counter ) {
+            $metrics[ $counter ] = isset( $metrics[ $counter ] ) ? (int) $metrics[ $counter ] : 0;
+            $metrics[ $counter ] += (int) ( $delta[ $counter ] ?? 0 );
+        }
+
+        $metrics['total_latency_ms'] = isset( $metrics['total_latency_ms'] ) ? (float) $metrics['total_latency_ms'] : 0.0;
+        $metrics['total_latency_ms'] += (float) ( $delta['latency_ms'] ?? 0 );
+
+        if ( empty( $metrics['source_counts'] ) || ! is_array( $metrics['source_counts'] ) ) {
+            $metrics['source_counts'] = array();
+        }
+        if ( ! empty( $delta['sources'] ) && is_array( $delta['sources'] ) ) {
+            foreach ( $delta['sources'] as $source ) {
+                $label = sanitize_text_field( (string) $source );
+                if ( '' === $label ) {
+                    continue;
+                }
+                $metrics['source_counts'][ $label ] = isset( $metrics['source_counts'][ $label ] )
+                    ? ( (int) $metrics['source_counts'][ $label ] + 1 )
+                    : 1;
+            }
+        }
+
+        update_option( 'song_credits_metrics', $metrics, false );
+    }
+
+    /**
+     * Elapsed milliseconds helper.
+     */
+    private function elapsed_ms( $started_at ) {
+        $elapsed = microtime( true ) - (float) $started_at;
+        return round( max( 0, $elapsed ) * 1000, 2 );
     }
 }

@@ -48,6 +48,8 @@ function song_credits_activate() {
             'discogs_token'  => '',
             'contact_email'  => get_option( 'admin_email' ),
             'cache_duration' => 24,
+            'rate_limit_per_minute' => 10,
+            'debug_logging'  => 0,
         ) );
     }
 }

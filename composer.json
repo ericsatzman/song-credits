@@ -1,0 +1,20 @@
+{
+  "name": "ericsatzman/song-credits",
+  "description": "WordPress Song Credits plugin",
+  "type": "wordpress-plugin",
+  "require-dev": {
+    "squizlabs/php_codesniffer": "^3.10",
+    "wp-coding-standards/wpcs": "^3.1",
+    "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+    "phpunit/phpunit": "^9.6"
+  },
+  "scripts": {
+    "phpcs": "phpcs -q",
+    "phpcbf": "phpcbf -q"
+  },
+  "config": {
+    "allow-plugins": {
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    }
+  }
+}

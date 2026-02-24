@@ -18,11 +18,21 @@ class Song_Credits_API {
     /** @var string Wikidata API base URL. */
     private $wd_api = 'https://www.wikidata.org/w/api.php';
 
+    /** @var array<string, string[]> Allowed hosts per data source. */
+    private $allowed_hosts = array(
+        'musicbrainz' => array( 'musicbrainz.org' ),
+        'discogs'     => array( 'api.discogs.com' ),
+        'wikidata'    => array( 'www.wikidata.org', 'wikidata.org' ),
+    );
+
     /** @var string User-Agent sent with every request. */
     private $user_agent;
 
     /** @var string Discogs personal access token (optional). */
     private $discogs_token;
+
+    /** @var bool Whether debug logging is enabled. */
+    private $debug_logging = false;
 
     /**
      * Constructor — reads settings once.
@@ -32,6 +42,7 @@ class Song_Credits_API {
         $email               = ! empty( $settings['contact_email'] ) ? $settings['contact_email'] : 'admin@example.com';
         $this->user_agent    = 'SongCreditsWP/' . SONG_CREDITS_VERSION . ' ( ' . $email . ' )';
         $this->discogs_token = ! empty( $settings['discogs_token'] ) ? $settings['discogs_token'] : '';
+        $this->debug_logging = ! empty( $settings['debug_logging'] );
     }
 
     /* ------------------------------------------------------------------
@@ -98,7 +109,74 @@ class Song_Credits_API {
             }
         }
 
-        return $credits;
+        return $this->sanitize_credits_payload( $credits );
+    }
+
+    /**
+     * Basic connectivity checks for upstream providers.
+     *
+     * @return array<string,array<string,mixed>>
+     */
+    public function test_connections() {
+        $results = array(
+            'musicbrainz' => array( 'ok' => false, 'message' => __( 'Unknown', 'song-credits' ) ),
+            'discogs'     => array( 'ok' => false, 'message' => __( 'Unknown', 'song-credits' ) ),
+            'wikidata'    => array( 'ok' => false, 'message' => __( 'Unknown', 'song-credits' ) ),
+        );
+
+        $mb = $this->request(
+            add_query_arg(
+                array(
+                    'query' => 'recording:"Superstition" AND artist:"Stevie Wonder"',
+                    'fmt'   => 'json',
+                    'limit' => 1,
+                ),
+                $this->mb_base . 'recording/'
+            ),
+            'musicbrainz'
+        );
+        if ( is_wp_error( $mb ) ) {
+            $results['musicbrainz']['message'] = $mb->get_error_message();
+        } else {
+            $results['musicbrainz']['ok'] = true;
+            $results['musicbrainz']['message'] = __( 'Reachable', 'song-credits' );
+        }
+
+        if ( empty( $this->discogs_token ) ) {
+            $results['discogs']['ok'] = false;
+            $results['discogs']['message'] = __( 'Skipped: no token configured', 'song-credits' );
+        } else {
+            $dc = $this->request( $this->dc_base . 'oauth/identity', 'discogs' );
+            if ( is_wp_error( $dc ) ) {
+                $results['discogs']['message'] = $dc->get_error_message();
+            } else {
+                $results['discogs']['ok'] = true;
+                $results['discogs']['message'] = __( 'Reachable and authenticated', 'song-credits' );
+            }
+        }
+
+        $wd = $this->request(
+            add_query_arg(
+                array(
+                    'action'   => 'wbsearchentities',
+                    'search'   => 'Superstition',
+                    'language' => 'en',
+                    'type'     => 'item',
+                    'limit'    => 1,
+                    'format'   => 'json',
+                ),
+                $this->wd_api
+            ),
+            'wikidata'
+        );
+        if ( is_wp_error( $wd ) ) {
+            $results['wikidata']['message'] = $wd->get_error_message();
+        } else {
+            $results['wikidata']['ok'] = true;
+            $results['wikidata']['message'] = __( 'Reachable', 'song-credits' );
+        }
+
+        return $results;
     }
 
     /* ------------------------------------------------------------------
@@ -336,10 +414,26 @@ class Song_Credits_API {
      * @return array|WP_Error Decoded JSON body or error.
      */
     private function request( $url, $source = 'musicbrainz' ) {
+        if ( empty( $this->allowed_hosts[ $source ] ) ) {
+            $this->log_event( 'error', 'Unsupported API source', array( 'source' => $source ) );
+            do_action( 'song_credits_api_error', $source, 'unsupported_source' );
+            return new WP_Error( 'api_source_error', __( 'Unsupported API source', 'song-credits' ) );
+        }
+
+        $host = wp_parse_url( $url, PHP_URL_HOST );
+        if ( ! is_string( $host ) || ! in_array( strtolower( $host ), $this->allowed_hosts[ $source ], true ) ) {
+            $this->log_event( 'warning', 'Blocked API host', array( 'source' => $source, 'host' => (string) $host ) );
+            do_action( 'song_credits_api_error', $source, 'blocked_host' );
+            return new WP_Error( 'api_host_error', __( 'Blocked API host', 'song-credits' ) );
+        }
+
         $args = array(
             'timeout'    => 15,
             'user-agent' => $this->user_agent,
             'headers'    => array(),
+            'redirection'        => 3,
+            'reject_unsafe_urls' => true,
+            'sslverify'          => true,
         );
 
         if ( 'discogs' === $source && $this->discogs_token ) {
@@ -351,6 +445,17 @@ class Song_Credits_API {
             $response = wp_remote_get( $url, $args );
 
             if ( is_wp_error( $response ) ) {
+                $this->log_event(
+                    'warning',
+                    'API request transport error',
+                    array(
+                        'source'  => $source,
+                        'host'    => $host,
+                        'attempt' => $attempt,
+                        'error'   => $response->get_error_message(),
+                    )
+                );
+                do_action( 'song_credits_api_error', $source, 'transport' );
                 if ( $attempt < $max_attempts ) {
                     sleep( $attempt );
                     continue;
@@ -360,9 +465,30 @@ class Song_Credits_API {
 
             $code = (int) wp_remote_retrieve_response_code( $response );
             if ( 200 !== $code ) {
+                $this->log_event(
+                    'warning',
+                    'API non-200 response',
+                    array(
+                        'source'  => $source,
+                        'host'    => $host,
+                        'attempt' => $attempt,
+                        'code'    => $code,
+                    )
+                );
+                do_action( 'song_credits_api_error', $source, 'http_' . $code );
                 if ( $attempt < $max_attempts && $this->is_retryable_status( $code ) ) {
                     $retry_after = (int) wp_remote_retrieve_header( $response, 'retry-after' );
                     $delay       = $retry_after > 0 ? min( $retry_after, 10 ) : $attempt;
+                    $this->log_event(
+                        'info',
+                        'API retry scheduled',
+                        array(
+                            'source'      => $source,
+                            'code'        => $code,
+                            'attempt'     => $attempt,
+                            'retry_after' => $delay,
+                        )
+                    );
                     sleep( max( 1, $delay ) );
                     continue;
                 }
@@ -376,6 +502,16 @@ class Song_Credits_API {
             $data = json_decode( wp_remote_retrieve_body( $response ), true );
 
             if ( JSON_ERROR_NONE !== json_last_error() ) {
+                $this->log_event(
+                    'warning',
+                    'API JSON decode error',
+                    array(
+                        'source'  => $source,
+                        'host'    => $host,
+                        'attempt' => $attempt,
+                    )
+                );
+                do_action( 'song_credits_api_error', $source, 'json_decode' );
                 if ( $attempt < $max_attempts ) {
                     sleep( $attempt );
                     continue;
@@ -387,6 +523,102 @@ class Song_Credits_API {
         }
 
         return new WP_Error( 'api_error', __( 'API request failed', 'song-credits' ) );
+    }
+
+    /**
+     * Log bounded debug context to error log when enabled.
+     */
+    private function log_event( $level, $message, $context = array() ) {
+        if ( ! $this->debug_logging ) {
+            return;
+        }
+
+        $safe_context = array();
+        if ( is_array( $context ) ) {
+            $context = array_slice( $context, 0, 8, true );
+            foreach ( $context as $key => $value ) {
+                $k = sanitize_key( (string) $key );
+                if ( '' === $k || false !== strpos( $k, 'token' ) ) {
+                    continue;
+                }
+                if ( is_scalar( $value ) || null === $value ) {
+                    $clean_value = sanitize_text_field( (string) $value );
+                    $safe_context[ $k ] = function_exists( 'mb_substr' ) ? mb_substr( $clean_value, 0, 200 ) : substr( $clean_value, 0, 200 );
+                } else {
+                    $safe_context[ $k ] = '[non-scalar]';
+                }
+            }
+        }
+
+        $line = sprintf(
+            'SongCredits[%s] %s %s',
+            strtoupper( sanitize_key( (string) $level ) ),
+            sanitize_text_field( (string) $message ),
+            wp_json_encode( $safe_context )
+        );
+        error_log( $line ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+    }
+
+    /**
+     * Sanitize the credits payload before it is cached/returned.
+     */
+    private function sanitize_credits_payload( $credits ) {
+        if ( ! is_array( $credits ) ) {
+            return array(
+                'artist'     => '',
+                'title'      => '',
+                'year'       => '',
+                'categories' => array(),
+                'sources'    => array(),
+            );
+        }
+
+        $clean = array(
+            'artist'     => sanitize_text_field( (string) ( $credits['artist'] ?? '' ) ),
+            'title'      => sanitize_text_field( (string) ( $credits['title'] ?? '' ) ),
+            'year'       => $this->extract_year( $credits['year'] ?? '' ),
+            'categories' => array(),
+            'sources'    => array(),
+        );
+
+        if ( ! empty( $credits['sources'] ) && is_array( $credits['sources'] ) ) {
+            foreach ( $credits['sources'] as $source ) {
+                $source = sanitize_text_field( (string) $source );
+                if ( '' === $source ) {
+                    continue;
+                }
+                $clean['sources'][] = $source;
+            }
+            $clean['sources'] = array_values( array_unique( $clean['sources'] ) );
+        }
+
+        if ( ! empty( $credits['categories'] ) && is_array( $credits['categories'] ) ) {
+            foreach ( $credits['categories'] as $category => $entries ) {
+                $category_name = sanitize_text_field( (string) $category );
+                if ( '' === $category_name || ! is_array( $entries ) ) {
+                    continue;
+                }
+
+                $clean_entries = array();
+                foreach ( $entries as $entry ) {
+                    $name = sanitize_text_field( (string) ( $entry['name'] ?? '' ) );
+                    $role = sanitize_text_field( (string) ( $entry['role'] ?? '' ) );
+                    if ( '' === $name || '' === $role ) {
+                        continue;
+                    }
+                    $clean_entries[] = array(
+                        'name' => $name,
+                        'role' => $role,
+                    );
+                }
+
+                if ( ! empty( $clean_entries ) ) {
+                    $clean['categories'][ $category_name ] = $clean_entries;
+                }
+            }
+        }
+
+        return $clean;
     }
 
     /* ------------------------------------------------------------------
